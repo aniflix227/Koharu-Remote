@@ -115,7 +115,7 @@ function appConfigToPatch(cfg: AppConfig): ConfigPatch {
       translator: cfg.pipeline.translator,
       inpainter: cfg.pipeline.inpainter,
       renderer: cfg.pipeline.renderer,
-      remote_ai_url: cfg.pipeline.remote_ai_url,
+      remoteAiUrl: cfg.pipeline.remote_ai_url,
     }
   }
   if (cfg.providers) {

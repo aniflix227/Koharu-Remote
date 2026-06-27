@@ -21,5 +21,5 @@ export interface PipelineConfigPatch {
   segmenter?: string | null
   /** @nullable */
   translator?: string | null
-  remote_ai_url?: string | null
+  remoteAiUrl?: string | null
 }
