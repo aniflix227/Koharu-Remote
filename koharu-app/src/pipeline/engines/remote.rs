@@ -1,9 +1,8 @@
 use anyhow::{Result, bail, anyhow};
 use async_trait::async_trait;
-use image::DynamicImage;
-use koharu_core::{ImageRole, MaskRole, Op, TextData};
+use koharu_core::{ImageRole, MaskRole, Op, TextData, NodeId};
 use serde::{Deserialize, Serialize};
-use reqwest::{Client, multipart};
+use reqwest_middleware::reqwest::{Client, multipart};
 use std::io::Cursor;
 
 use crate::pipeline::artifacts::Artifact;
@@ -29,10 +28,12 @@ impl Into<koharu_ml::types::TextRegion> for RemoteTextRegion {
             y: self.y,
             width: self.width,
             height: self.height,
-            label: 0,
             confidence: 1.0,
+            line_polygons: vec![],
+            source_direction: None,
+            rotation_deg: None,
+            detected_font_size_px: None,
             detector: self.detector,
-            mask: None,
         }
     }
 }
@@ -123,21 +124,47 @@ impl Engine for RemoteOcrModel {
         let image = load_source_image(ctx.scene, ctx.page, ctx.blobs)?;
         let mut ops = Vec::new();
         
-        let nodes = match &ctx.options.text_node_ids {
+        let nodes: Vec<NodeId> = match &ctx.options.text_node_ids {
             Some(ids) => ids.clone(),
-            None => crate::pipeline::engines::support::text_node_ids(ctx.scene, ctx.page),
+            None => crate::pipeline::engines::support::text_nodes(ctx.scene, ctx.page).into_iter().map(|(id, _, _)| id).collect(),
         };
 
         let client = Client::new();
         let url = format!("{}/v1/ocr", remote_url.trim_end_matches('/'));
 
         for node_id in nodes {
-            let (bbox, text_data) = match crate::pipeline::engines::support::get_text_node(ctx.scene, ctx.page, node_id) {
-                Some(data) => data,
+            let page = match ctx.scene.page(ctx.page) {
+                Some(p) => p,
                 None => continue,
             };
+            let node = match page.nodes.get(&node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let text_data = match &node.kind {
+                koharu_core::NodeKind::Text(t) => t,
+                _ => continue,
+            };
+            
+            let bbox = (
+                node.transform.x,
+                node.transform.y,
+                node.transform.x + node.transform.width,
+                node.transform.y + node.transform.height,
+            );
 
-            let region = koharu_ml::comic_text_detector::crop_text_block_bbox(&image, bbox.0, bbox.1, bbox.2, bbox.3);
+            let region = koharu_ml::comic_text_detector::crop_text_block_bbox(&image, &koharu_ml::types::TextRegion {
+                x: bbox.0,
+                y: bbox.1,
+                width: bbox.2 - bbox.0,
+                height: bbox.3 - bbox.1,
+                confidence: 1.0,
+                line_polygons: vec![],
+                source_direction: None,
+                rotation_deg: None,
+                detected_font_size_px: None,
+                detector: None,
+            });
             let mut buf = Cursor::new(Vec::new());
             region.write_to(&mut buf, image::ImageFormat::Jpeg)?;
             let image_bytes = buf.into_inner();
@@ -149,7 +176,7 @@ impl Engine for RemoteOcrModel {
 
             let res = client.post(&url).multipart(form).send().await?;
             if !res.status().is_success() {
-                tracing::warn!("Remote OCR failed for node {}: {}", node_id, res.status());
+                tracing::warn!("Remote OCR failed for node {}: {}", node_id.0, res.status());
                 continue;
             }
 
@@ -169,15 +196,19 @@ impl Engine for RemoteOcrModel {
             if ocr_res.text.is_empty() {
                 continue;
             }
-
-            let mut new_text = text_data.clone();
-            new_text.source = ocr_res.text;
             
             ops.push(Op::UpdateNode {
                 page: ctx.page,
-                node: node_id,
-                prev: text_data.into(),
-                patch: new_text.into(),
+                id: node_id,
+                patch: koharu_core::NodePatch {
+                    data: Some(koharu_core::NodeDataPatch::Text(koharu_core::TextDataPatch {
+                        text: Some(Some(ocr_res.text)),
+                        ..Default::default()
+                    })),
+                    transform: None,
+                    visible: None,
+                },
+                prev: koharu_core::NodePatch::default(),
             });
         }
 
@@ -233,7 +264,7 @@ impl Engine for RemoteInpainterModel {
             bail!("Remote inpainter failed: {}", res.status());
         }
 
-        let bytes = res.bytes().await?;
+        let bytes = res.bytes().await?.to_vec();
         let result_img = image::load_from_memory(&bytes)?;
 
         let (w, h) = image_dimensions(&result_img);
