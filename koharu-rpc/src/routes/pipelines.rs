@@ -88,7 +88,7 @@ async fn start_pipeline(
             text_node_ids: req.text_node_ids,
             region: req.region,
             reading_order: req.reading_order,
-            remote_ai_url: app.config().pipeline.remote_ai_url.clone(),
+            remote_ai_url: app.config.load().pipeline.remote_ai_url.clone(),
         },
     };
 
